@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AgentOps - Approval Queue</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            opacity: 0.9;
+        }
+        
+        .content {
+            padding: 30px;
+        }
+        
+        .refresh-btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-bottom: 20px;
+            transition: background 0.3s;
+        }
+        
+        .refresh-btn:hover {
+            background: #5568d3;
+        }
+        
+        .approval-card {
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            background: #f9f9f9;
+            transition: all 0.3s;
+        }
+        
+        .approval-card:hover {
+            border-color: #667eea;
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.1);
+        }
+        
+        .approval-card h3 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 20px;
+        }
+        
+        .plan-details {
+            background: white;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+        }
+        
+        .plan-details p {
+            margin: 8px 0;
+            color: #555;
+        }
+        
+        .plan-details strong {
+            color: #333;
+        }
+        
+        .evidence {
+            margin-top: 15px;
+            padding: 15px;
+            background: #f0f7ff;
+            border-left: 4px solid #667eea;
+            border-radius: 4px;
+        }
+        
+        .evidence h4 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+        
+        .evidence-item {
+            margin: 10px 0;
+            padding: 10px;
+            background: white;
+            border-radius: 4px;
+        }
+        
+        .actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: all 0.3s;
+            flex: 1;
+        }
+        
+        .btn-approve {
+            background: #10b981;
+            color: white;
+        }
+        
+        .btn-approve:hover {
+            background: #059669;
+        }
+        
+        .btn-reject {
+            background: #ef4444;
+            color: white;
+        }
+        
+        .btn-reject:hover {
+            background: #dc2626;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #888;
+        }
+        
+        .empty-state h2 {
+            margin-bottom: 10px;
+            color: #555;
+        }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        
+        .status-pending {
+            background: #fef3c7;
+            color: #92400e;
+        }
+        
+        .status-approved {
+            background: #d1fae5;
+            color: #065f46;
+        }
+        
+        .status-rejected {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+        
+        .timestamp {
+            color: #888;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 AgentOps Approval Queue</h1>
+            <p>Review and approve autonomous deployment plans</p>
+        </div>
+        
+        <div class="content">
+            <button class="refresh-btn" onclick="loadApprovals()">🔄 Refresh</button>
+            
+            <div id="approvals-container">
+                <div class="empty-state">
+                    <h2>Loading approvals...</h2>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const API_BASE = window.location.origin;
+        
+        async function loadApprovals() {
+            try {
+                const response = await fetch(`${API_BASE}/approvals`);
+                const data = await response.json();
+                
+                const container = document.getElementById('approvals-container');
+                
+                if (data.count === 0) {
+                    container.innerHTML = `
+                        <div class="empty-state">
+                            <h2>✅ No Pending Approvals</h2>
+                            <p>All deployment plans have been processed.</p>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                container.innerHTML = data.pending_approvals.map(approval => {
+                    const plan = approval.plan;
+                    const artifact = plan.artifact;
+                    const evidence = plan.evidence || [];
+                    
+                    return `
+                        <div class="approval-card">
+                            <h3>Plan: ${plan.plan_id.substring(0, 8)}...</h3>
+                            <span class="status-badge status-pending">Pending Approval</span>
+                            
+                            <div class="plan-details">
+                                <p><strong>User:</strong> ${plan.user_id}</p>
+                                <p><strong>Intent:</strong> ${plan.intent}</p>
+                                <p><strong>Environment:</strong> ${plan.env}</p>
+                                <p><strong>Model Name:</strong> ${artifact.model_name}</p>
+                                <p><strong>Endpoint Name:</strong> ${artifact.endpoint_name}</p>
+                                <p><strong>Instance Type:</strong> ${artifact.instance_type}</p>
+                                <p><strong>Instance Count:</strong> ${artifact.instance_count}</p>
+                                <p><strong>Budget:</strong> $${artifact.budget_usd_per_hour}/hour</p>
+                            </div>
+                            
+                            ${evidence.length > 0 ? `
+                                <div class="evidence">
+                                    <h4>📚 Policy Evidence (RAG)</h4>
+                                    ${evidence.map(ev => `
+                                        <div class="evidence-item">
+                                            <strong>${ev.title}</strong>
+                                            <p>${ev.snippet}</p>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            ` : ''}
+                            
+                            <div class="timestamp">
+                                Created: ${new Date(plan.created_at).toLocaleString()}
+                            </div>
+                            
+                            <div class="actions">
+                                <button class="btn btn-approve" onclick="approvePlan('${plan.plan_id}', 'You')">
+                                    ✅ Approve
+                                </button>
+                                <button class="btn btn-reject" onclick="rejectPlan('${plan.plan_id}', 'You')">
+                                    ❌ Reject
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+                
+            } catch (error) {
+                console.error('Error loading approvals:', error);
+                document.getElementById('approvals-container').innerHTML = `
+                    <div class="empty-state">
+                        <h2>❌ Error</h2>
+                        <p>Failed to load approvals: ${error.message}</p>
+                    </div>
+                `;
+            }
+        }
+        
+        async function approvePlan(planId, approver) {
+            if (!confirm(`Approve deployment plan ${planId.substring(0, 8)}?`)) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE}/approve`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        plan_id: planId,
+                        approver: approver,
+                        decision: 'approved'
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok) {
+                    alert(`✅ Plan approved! Deployment started.`);
+                    loadApprovals();
+                } else {
+                    alert(`❌ Error: ${result.detail || 'Unknown error'}`);
+                }
+            } catch (error) {
+                alert(`❌ Error approving plan: ${error.message}`);
+            }
+        }
+        
+        async function rejectPlan(planId, approver) {
+            const reason = prompt('Enter rejection reason (optional):');
+            
+            try {
+                const response = await fetch(`${API_BASE}/approve`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        plan_id: planId,
+                        approver: approver,
+                        decision: 'rejected',
+                        reason: reason || 'Rejected by operator'
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok) {
+                    alert(`✅ Plan rejected.`);
+                    loadApprovals();
+                } else {
+                    alert(`❌ Error: ${result.detail || 'Unknown error'}`);
+                }
+            } catch (error) {
+                alert(`❌ Error rejecting plan: ${error.message}`);
+            }
+        }
+        
+        // Load approvals on page load
+        loadApprovals();
+        
+        // Auto-refresh every 30 seconds
+        setInterval(loadApprovals, 30000);
+    </script>
+</body>
+</html>
+

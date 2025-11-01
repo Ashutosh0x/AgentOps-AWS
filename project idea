@@ -1,0 +1,227 @@
+AgentOps — Technical MVP Plan & Architecture
+Purpose: This document is a concise, execution-ready technical plan to build the AgentOps Autonomous
+MLOps system described in your brief. It targets a hackathon-quality MVP that demonstrates safe, agentic
+orchestration of model deployment and lifecycle tasks using NVIDIA NIMs (Llama-3 NIM + NeMo Retriever
+NIM) and AWS (recommended: SageMaker manifold for hackathon speed and safety). The plan is platformagnostic where possible and includes an EKS alternative for teams wanting maximal control.
+1. Executive summary (MVP scope)
+MVP goal: Deliver a working AgentOps prototype that autonomously executes a safe deploy flow for an ML
+model and demonstrates RAG grounding, command validation, HITL for production, automated rollback
+configuration, and immutable audit logging.
+Must-have features (MVP): - Llama-3 NIM (llama-3.1-nemotron-nano-8B-v1) used as Coordinator Agent
+(deployed to SageMaker JumpStart).
+- NeMo Retriever NIM (embedding + rerank) used as the Agentic RAG engine (SageMaker).
+- Orchestrator (LangChain/Lightweight controller) that issues structured deployment plans (JSON) and calls
+tool agents.
+- Guardrail service (guardrails-ai + AgentGuard) to validate structured outputs before execution.
+- HITL approval for production-path changes (simple UI + workflow pause).
+- Auto rollback configuration for the deployed endpoint (SageMaker AutoRollbackConfiguration).
+- Immutable audit trail: DynamoDB application log + CloudTrail → S3 Object Lock.
+Optional but high-impact stretch (if time allows): - EKS Operator path with declarative NIM Operator
+CRDs and Argo Rollouts.
+- Slack/Teams integration for approvals & alerts.
+- Explainability view: collapsed chain-of-thought and RAG evidence cards.
+2. High-level architecture (text diagram)
++-----------------------+ +-------------------------+
++------------------+
+| User / HITL UI | <--> | Agent Orchestrator | <--> | Llama-3
+NIM |
+| (web + approval) | | (LangChain/FAAS) | | (SageMaker
+NIM) |
++-----------------------+ +---+---------------------+
++------------------+
+ | ^
+ | |
+ v |
+1
+ +-------------------------------+
+ | Retrieval NIM (NeMo) + Vector |
+ | DB (OpenSearch Serverless) |
+ +-------------------------------+
+ |
+ v
+ +-----------------------------------------------+
+ | Guardrail Service (guardrails-ai + AgentGuard)|
+ +-----------------------------------------------+
+ |
+ (validated commands)
+ v
+ +-----------------------------------------------+
+ | Execution Toolkit (SageMaker SDK / AWS Boto3) |
+ | or EKS Toolkit (kubectl/Helm via Operator) |
+ +-----------------------------------------------+
+ |
+ v
+ +------------------------+ +-----------------
+ | DynamoDB (app logs) | | CloudTrail -> S3 |
+ +------------------------+ +-----------------
+3. Component responsibilities
+Agent Coordinator (Llama-3 NIM) - Receives user intent (natural language) and decomposes it to
+structured plan (JSON).
+- Uses Plan-and-Execute and ReAct loops with iterative RAG calls to NeMo Retriever NIM.
+- Produces structured outputs only (Pydantic-validated JSON/YAML) for deployments, rollbacks, and
+monitors.
+Retrieval Engine (NeMo Retriever NIM) - Two-stage RAG: embeddings -> recall -> rerank microservice.
+- Contains policy docs, security playbooks, cost playbooks, operator runbooks, and sample manifests.
+Orchestrator (LangChain/Light-weight controller) - Manages the agent loop, calls NIMs (LLM+retriever),
+triggers guardrails, waits for HITL when required, and calls the execution toolkit.
+Guardrail Service (Layer 1) - Validates JSON/YAML using guardrails-ai & pydantic models.
+- Checks budget/cost constraints with AgentGuard.
+- Blocks invalid or high-cost plans and returns structured errors to the agent.
+HITL Approver (Layer 2) - Simple web UI or Slack integration with an approval queue for production
+actions.
+- Timeout & escalation policies (e.g., auto-reject on timeout).
+2
+Execution Toolkit (Actuators) - SageMakerTool: wraps boto3/sagemaker-sdk operations (CreateEndpoint/
+UpdateEndpoint + configure ModelMonitor/DeploymentGuardrails).
+- EKSTool: (optional) generates operator CRDs (NIMService / NIMCache) and applies via kubectl apply
+or Helm (prefer operator CRDs).
+Audit & Logging (Layer 3) - DynamoDB for quick queryable logs.
+- CloudTrail Data Events capturing DynamoDB item writes -> delivered to S3 with Object Lock enabled for
+immutability.
+4. Data model & schemas (example)
+Pydantic model: SageMakerDeploymentConfig (example)
+from pydantic import BaseModel, Field, conint
+class SageMakerDeploymentConfig(BaseModel):
+model_name: str
+endpoint_name: str
+instance_type: str
+instance_count: conint(ge=1, le=4) = 1
+max_payload_mb: conint(ge=1, le=1024) = 6
+autoscaling_min: conint(ge=1, le=4) = 1
+autoscaling_max: conint(ge=1, le=8) = 2
+rollback_alarms: list[str] = Field(default_factory=list)
+budget_usd_per_hour: float = Field(default=10.0, gt=0)
+- Guardrail service will validate generated JSON against this model before any execution.
+5. Agent workflow (detailed)
+User Intent: user submits "Deploy Llama-3.1 8B NIM for chatbot-x" via UI.
+Planning: Agent (Llama-3 NIM) triggers planning; calls NeMo Retriever to fetch policies (cost,
+security, namespace rules).
+Structured Plan: Agent outputs SageMakerDeploymentConfig JSON (or EKS CRD YAML).
+Guardrails: Validate JSON schema + cost checks. If failed → agent receives error & re-plans.
+HITL: If endpoint_name contains "prod" or any policy flags high risk → pause & send for human
+approval.
+Execution: After validation & approval, Orchestrator calls Execution Toolkit to create/update
+endpoint and config Model Monitor + AutoRollbackConfiguration.
+Audit: Write plan + result to DynamoDB; CloudTrail captures change to S3 with Object Lock.
+Verification: Agent runs post-deploy checks (sampling or Model Monitor subscription) and writes
+status.
+1.
+2.
+3.
+4.
+5.
+6.
+7.
+8.
+3
+6. Deployment plan & timeline (hackathon-ready)
+Recommendation: Use SageMaker manifold for MVP (fast, safe). EKS path is documented as an optional
+enhancement.
+Day 0 — Prep
+Register team; request promotional credits; collect hackathon credentials.
+Create repo scaffold and branch strategy.
+Day 1 — Core NIMs & Orchestrator
+Deploy Llama-3 NIM on SageMaker JumpStart (minimal test).
+Deploy NeMo Retriever (embedding + reranker) on SageMaker with one sample corpus (policy doc).
+Build a minimal orchestrator (FastAPI) that accepts intents and calls the LLM NIM.
+Day 2 — RAG + Structured Plan
+Implement RAG calls (top-k retrieval + pass to LLM with instructions to produce structured JSON).
+Implement Pydantic schemas and guardrail wrapper.
+Add sample documents (policy, cost playbook) and test a few plans.
+Day 3 — Execution & Safety
+Implement SageMakerTool that takes validated JSON and calls CreateEndpoint/UpdateEndpoint
+(use a small hello-world model image for demo).
+Configure Model Monitor & AutoRollback (Demo: simulate alarm).
+Implement HITL pause for prod deployments (simple web UI or CLI approval).
+Day 4 — Audit, Demo & Polish
+Add DynamoDB + CloudTrail S3 ObjectLock flow for immutable logs.
+Create demo script & record <3 min video.
+Write README, deployment steps, and sample dataset.
+Smoke tests, cost checks, and final packaging.
+7. Infra & deployment artifacts (what to include in repo)
+README.md — pitch, architecture diagram (SVG), quickstart for SageMaker deploy, EKS notes.
+deploy/ — Terraform scripts or CloudFormation for: VPC, SageMaker role, S3 buckets (for
+CloudTrail), DynamoDB table, OpenSearch Serverless (or FAISS local).
+k8s/ — optional EKS Helm charts or NIM Operator CRD examples.
+orchestrator/ — FastAPI service code, LangChain agent wiring, tool wrappers.
+guardrails/ — pydantic models + guardrails-ai config.
+tools/ — sage_tool.py (SageMaker API wrapper), eks_tool.py (kubectl/helm wrapper).
+docs/ — deployment runbook, security & approval policies.
+•
+•
+•
+•
+•
+•
+•
+•
+•
+•
+•
+•
+•
+•
+•
+•
+•
+•
+•
+•
+•
+•
+4
+demo/ — demo recording, sample inputs, screenshots, smoke-test scripts.
+8. API contracts & examples
+POST /intent — submit a user intent payload
+{ "user_id": "alice@example.com", "intent": "deploy llama 3.1 8b for chatbotx", "env": "staging" }
+Agent returns (200)
+{ "plan_id": "plan-123", "status":"awaiting_validation", "artifact": { /* JSON/
+YAML plan */ } }
+POST /approve — human approves plan
+{ "plan_id":"plan-123", "approver":"bob@example.com", "decision":"approve" }
+GET /plan/{id}/status — returns plan execution status and links to audit log.
+9. Testing & QA
+Unit tests - Pydantic schemas (boundary tests: instance_count, budget, instance types).
+- Guardrail behavior for invalid JSON and cost violations.
+Integration tests - Mocked calls to Llama-3 + NeMo Retriever that return canned outputs, ensuring
+orchestrator handles re-planning.
+- End-to-end deploy flow using a tiny container image that returns a health check.
+Chaos & safety tests - Simulate Model Monitor alarm to validate auto-rollback works.
+- Attempt to produce an invalid plan and verify guardrail blocks it.
+10. Demo script (under 3 minutes)
+0:00–0:10 — Title: AgentOps: Autonomous MLOps (SageMaker path).
+0:10–0:30 — Show UI: Enter intent "Deploy llama-3.1 8B to staging as chatbot-x" and hit Deploy.
+0:30–0:55 — Show RAG hits (policy card) and structured plan JSON generated by LLM.
+•
+1.
+2.
+3.
+5
+0:55–1:20 — Show guardrail validation pass; if deploying to prod show HITL approval popup and
+approve.
+1:20–1:40 — Show execution: CreateEndpoint API call + Model Monitor configuration logs.
+1:40–2:10 — Trigger simulated CloudWatch alarm; show SageMaker rollback happens automatically.
+2:10–2:40 — Show audit logs in UI (DynamoDB query) and immutable CloudTrail S3 object with
+Object Lock.
+2:40–3:00 — Wrap: explain safety layers and next steps.
+11. Deliverables for submission
+Public GitHub repo with code & deploy/ manifests.
+README with exact one-click SageMaker JumpStart + orchestrator local run instructions.
+demo/demo.mp4 (≤ 3 min).
+Short text description (one page) summarizing novelty and safety-first design.
+Optional: k8s/ folder for EKS operator CRD + Argo rollout examples.
+12. Cost & runbook notes (conservative)
+The $100 credit will cover ~24 hours of running the two NIM microservices if you use minimal
+instance types and shut down idle endpoints.
+Runbook: Start NIM microservices only when testing; tear down endpoints after recording demo;
+use small "hello-world" containers for smoke testing.
+13. Next steps (what I can produce now)
+Pick any of the following and I will generate it immediately: - A. Complete README.md and repo skeleton
+(file tree + sample commands).
+- B. FastAPI orchestrator starter code that wires to Llama-3 NIM and NeMo Retriever calls (with
+Pydantic validation).
+- C. guardrails folder content: pydantic schemas + guardrails-ai policy examples + AgentGuard costchecker integration.
+- D. SageMaker deployment example: Python script that receives SageMakerDeploymentConfig and calls
+create_model , create_endpoint_config , and create_endpoint (with
+AutoRollbackConfiguration).
+Tell me which of A/B/C/D you want first and I will generate it now.

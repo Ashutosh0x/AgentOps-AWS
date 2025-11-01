@@ -1,0 +1,9 @@
+{
+  "user_id": "alice@example.com",
+  "intent": "deploy llama-3.1 8B for chatbot-x",
+  "env": "prod",
+  "constraints": {
+    "budget_usd_per_hour": 50.0
+  }
+}
+

@@ -1,0 +1,32 @@
+{
+  "ServiceName": "agentops-orchestrator",
+  "SourceConfiguration": {
+    "ImageRepository": {
+      "ImageIdentifier": "690695877653.dkr.ecr.us-east-1.amazonaws.com/agentops-orchestrator:latest",
+      "ImageConfiguration": {
+        "Port": "8000",
+        "RuntimeEnvironmentVariables": {
+          "AWS_REGION": "us-east-1",
+          "DYNAMODB_TABLE_NAME": "agentops-audit-log",
+          "EXECUTE": "false"
+        }
+      },
+      "ImageRepositoryType": "ECR"
+    },
+    "AutoDeploymentsEnabled": true
+  },
+  "InstanceConfiguration": {
+    "Cpu": "1 vCPU",
+    "Memory": "2 GB",
+    "InstanceRoleArn": "arn:aws:iam::690695877653:role/service-role/AppRunnerECRAccessRole"
+  },
+  "HealthCheckConfiguration": {
+    "Protocol": "HTTP",
+    "Path": "/",
+    "Interval": 10,
+    "Timeout": 5,
+    "HealthyThreshold": 1,
+    "UnhealthyThreshold": 5
+  }
+}
+

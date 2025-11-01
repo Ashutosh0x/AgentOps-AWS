@@ -24,6 +24,7 @@
 </div>
 
 ---
+<img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/23c6a8bf-05b4-4608-a1bb-330548731f45" />
 
 ## 📋 Table of Contents
 
@@ -866,3 +867,4 @@ If you find this project useful, please consider giving it a star ⭐
 **Made for AWS & NVIDIA Hackathon 2024**
 
 </div>
+

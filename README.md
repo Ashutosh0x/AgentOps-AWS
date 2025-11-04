@@ -2,10 +2,7 @@
 
 <div align="center">
 
-![GitHub Stars](https://img.shields.io/github/stars/ashutosh0x/AgentOps-AWS?style=for-the-badge&logo=github&color=gold)
-![GitHub Forks](https://img.shields.io/github/forks/ashutosh0x/AgentOps-AWS?style=for-the-badge&logo=github&color=blue)
-![GitHub Issues](https://img.shields.io/github/issues/ashutosh0x/AgentOps-AWS?style=for-the-badge&logo=github&color=red)
-![GitHub License](https://img.shields.io/github/license/ashutosh0x/AgentOps-AWS?style=for-the-badge&logo=github&color=green)
+
 
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi&logoColor=white)
@@ -867,3 +864,4 @@ If you find this project useful, please consider giving it a star ⭐
 **Made for AWS & NVIDIA Hackathon 2024**
 
 </div>
+

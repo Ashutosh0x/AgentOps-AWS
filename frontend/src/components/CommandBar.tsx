@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect } from 'react'
-import { useSendCommand } from '../lib/hooks'
+import { useSendCommand, useDeploymentEvents } from '../lib/hooks'
 import { useQuery } from 'react-query'
 import { apiClient } from '../lib/api'
 import { Send, Loader2, CheckCircle2, XCircle } from 'lucide-react'
 import AgentActivityPanel from './AgentActivityPanel'
 import ProgressIndicator from './ProgressIndicator'
+import { useToast } from '../contexts/ToastContext'
 
 const COMMAND_SUGGESTIONS = [
   // Basic deployments
@@ -64,6 +65,7 @@ export default function CommandBar() {
   const inputRef = useRef<HTMLInputElement>(null)
   const suggestionsRef = useRef<HTMLDivElement>(null)
   const sendCommand = useSendCommand()
+  const { showToast } = useToast()
 
   // Poll deployment status if we have an active plan
   const { data: deploymentStatus } = useQuery(
@@ -81,6 +83,7 @@ export default function CommandBar() {
       },
     }
   )
+  const { data: sseStatus, disconnected: sseDisconnected } = useDeploymentEvents(currentPlanId)
   
   // Load recent commands from localStorage
   useEffect(() => {
@@ -112,12 +115,13 @@ export default function CommandBar() {
     if (!command.trim() || sendCommand.isLoading) return
     
     const commandToSubmit = command.trim()
+    const envToUse = env
 
     try {
       const result = await sendCommand.mutateAsync({
         command: commandToSubmit,
-        env: env,
-        user_id: 'dashboard-user@agentops.ai',
+        env: envToUse,
+        user_id: (import.meta as any).env?.VITE_DEFAULT_USER_ID || 'anonymous@local',
       })
       
       // Save to recent commands
@@ -132,9 +136,12 @@ export default function CommandBar() {
       
       setCommand('')
       setShowSuggestions(false)
+      showToast('Command submitted successfully', { variant: 'success' })
     } catch (error) {
       console.error('Failed to send command:', error)
       setCurrentPlanId(null)
+      const msg = (error as Error)?.message || 'Failed to process command'
+      showToast(msg, { variant: 'error', title: 'Command failed' })
     }
   }
   
@@ -341,39 +348,39 @@ export default function CommandBar() {
         )}
 
         {/* Show real-time status when polling is active */}
-        {sendCommand.isSuccess && sendCommand.data && deploymentStatus && (
+        {sendCommand.isSuccess && sendCommand.data && ((sseStatus && !sseDisconnected) || deploymentStatus) && (
           <div className={`mt-3 p-3 border rounded-lg ${
-            deploymentStatus.status === 'deployed' 
+            (sseStatus?.status || deploymentStatus?.status) === 'deployed' 
               ? 'bg-green-50 dark:bg-green-900/30 border-green-200 dark:border-green-800'
-              : deploymentStatus.status === 'failed'
+              : (sseStatus?.status || deploymentStatus?.status) === 'failed'
               ? 'bg-red-50 dark:bg-red-900/30 border-red-200 dark:border-red-800'
               : 'bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-800'
           }`}>
             <div className="flex items-start justify-between">
               <div className="flex-1">
                 <p className={`text-sm font-medium ${
-                  deploymentStatus.status === 'deployed'
+                  (sseStatus?.status || deploymentStatus?.status) === 'deployed'
                     ? 'text-green-800 dark:text-green-400'
-                    : deploymentStatus.status === 'failed'
+                    : (sseStatus?.status || deploymentStatus?.status) === 'failed'
                     ? 'text-red-800 dark:text-red-400'
                     : 'text-blue-800 dark:text-blue-400'
                 }`}>
-                  {deploymentStatus.status === 'deployed' && '✓ Deployment completed!'}
-                  {deploymentStatus.status === 'failed' && '✗ Deployment failed'}
-                  {deploymentStatus.status === 'deploying' && '⏳ Deployment in progress...'}
-                  {!['deployed', 'failed', 'deploying'].includes(deploymentStatus.status) && `Status: ${deploymentStatus.status.toUpperCase()}`}
+                  {(sseStatus?.status || deploymentStatus?.status) === 'deployed' && '✓ Deployment completed!'}
+                  {(sseStatus?.status || deploymentStatus?.status) === 'failed' && '✗ Deployment failed'}
+                  {(sseStatus?.status || deploymentStatus?.status) === 'deploying' && '⏳ Deployment in progress...'}
+                  {!['deployed', 'failed', 'deploying'].includes((sseStatus?.status || deploymentStatus?.status) || '') && `Status: ${(sseStatus?.status || deploymentStatus?.status)?.toUpperCase()}`}
                 </p>
                 {sendCommand.data.result?.artifact?.endpoint_name && (
                   <p className="text-xs text-gray-700 dark:text-gray-300 mt-1">
                     Endpoint: <span className="font-mono">{sendCommand.data.result.artifact.endpoint_name}</span>
                   </p>
                 )}
-                {deploymentStatus.current_step && (
+                {(sseStatus?.steps?.find((s: any) => ['thinking','executing','retrying'].includes(s.status))?.action || deploymentStatus?.current_step) && (
                   <p className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-                    Current step: <span className="font-medium">{deploymentStatus.current_step}</span>
+                    Current step: <span className="font-medium">{sseStatus?.steps?.find((s: any) => ['thinking','executing','retrying'].includes(s.status))?.action || deploymentStatus?.current_step}</span>
                   </p>
                 )}
-                {deploymentStatus.progress !== undefined && (
+                {deploymentStatus?.progress !== undefined && (
                   <p className="text-xs text-gray-600 dark:text-gray-400 mt-1">
                     Progress: <span className="font-medium">{deploymentStatus.progress}%</span>
                   </p>
@@ -422,10 +429,10 @@ export default function CommandBar() {
         )}
 
         {/* Progress Indicator - Show when we have deployment status */}
-        {currentPlanId && deploymentStatus && (
+        {currentPlanId && (deploymentStatus || sseStatus) && (
           <div className="mt-3">
             <ProgressIndicator
-              steps={deploymentStatus.steps?.map((step: { step_id: string; action: string; status: string; message?: string }) => ({
+              steps={(sseStatus?.steps || deploymentStatus?.steps)?.map((step: { step_id: string; action: string; status: string; message?: string }) => ({
                 id: step.step_id,
                 label: step.action,
                 status: 
@@ -435,7 +442,7 @@ export default function CommandBar() {
                   'pending',
                 message: step.message,
               })) || []}
-              currentStepIndex={deploymentStatus.steps?.findIndex((s: { status: string }) => 
+              currentStepIndex={(sseStatus?.steps || deploymentStatus?.steps)?.findIndex((s: { status: string }) => 
                 ['thinking', 'executing', 'retrying'].includes(s.status)
               )}
             />

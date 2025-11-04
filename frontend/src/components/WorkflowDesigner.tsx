@@ -146,8 +146,15 @@ export default function WorkflowDesigner() {
         {/* Graph area */}
         <div className="flex-1 relative bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700">
           {isLoading && selectedPlanId ? (
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="text-gray-500 dark:text-gray-400">Loading workflow...</div>
+            <div className="absolute inset-0 p-6">
+              <div className="animate-pulse space-y-4">
+                <div className="h-8 bg-gray-200 dark:bg-gray-700 rounded w-1/4"></div>
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="h-32 bg-gray-100 dark:bg-gray-800 rounded"></div>
+                  <div className="h-32 bg-gray-100 dark:bg-gray-800 rounded"></div>
+                  <div className="h-32 bg-gray-100 dark:bg-gray-800 rounded"></div>
+                </div>
+              </div>
             </div>
           ) : (
             <WorkflowGraph

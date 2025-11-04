@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from 'react-query'
+import { useEffect, useState } from 'react'
 import { apiClient, AgentCommandRequest } from './api'
 
 // Re-export useQueryClient for convenience
@@ -109,5 +110,35 @@ export const useSendCommand = () => {
       },
     }
   )
+}
+
+// SSE hook for live deployment updates (falls back to polling if not supported)
+export function useDeploymentEvents(planId: string | null) {
+  const [data, setData] = useState<any | null>(null)
+  const [error, setError] = useState<Error | null>(null)
+  const [disconnected, setDisconnected] = useState<boolean>(false)
+
+  useEffect(() => {
+    if (!planId) return
+    const base = import.meta.env.DEV ? '' : (import.meta as any).env?.VITE_API_URL?.replace(/\/$/, '') || ''
+    const url = `${base}/api/events/${planId}`
+    const es = new EventSource(url)
+    es.onmessage = (ev) => {
+      try {
+        const parsed = JSON.parse(ev.data)
+        setData(parsed)
+      } catch (e) {
+        // ignore
+      }
+    }
+    es.onerror = () => {
+      setError(new Error('SSE connection error'))
+      setDisconnected(true)
+      es.close()
+    }
+    return () => es.close()
+  }, [planId])
+
+  return { data, error, disconnected }
 }
 

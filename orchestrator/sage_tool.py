@@ -184,6 +184,44 @@ class SageMakerTool:
                 timestamp=datetime.utcnow()
             )
     
+    # Public granular operations for real-time progress tracking
+    def create_model(self, config: SageMakerDeploymentConfig, model_data_url: Optional[str] = None, container_image: Optional[str] = None) -> str:
+        if self.dry_run:
+            logger.info(f"[DRY-RUN] Would create model: {config.model_name}")
+            return config.model_name
+        return self._create_model(config, model_data_url, container_image)
+
+    def create_endpoint_config(self, config: SageMakerDeploymentConfig, model_name: str) -> str:
+        if self.dry_run:
+            logger.info(f"[DRY-RUN] Would create endpoint config: {config.endpoint_name}-config")
+            return f"{config.endpoint_name}-config"
+        return self._create_endpoint_config(config, model_name)
+
+    def create_endpoint(self, config: SageMakerDeploymentConfig, endpoint_config_name: str) -> str:
+        if self.dry_run:
+            logger.info(f"[DRY-RUN] Would create endpoint: {config.endpoint_name}")
+            return config.endpoint_name
+        return self._create_endpoint(config, endpoint_config_name)
+
+    def wait_for_endpoint(self, endpoint_name: str, delay_seconds: int = 10, max_attempts: int = 60) -> str:
+        """Wait for endpoint to reach InService/Failed and return final status."""
+        if self.dry_run:
+            logger.info(f"[DRY-RUN] Would wait for endpoint: {endpoint_name}")
+            return "InService"
+
+        try:
+            waiter = self.sagemaker_client.get_waiter('endpoint_in_service')
+            waiter.wait(EndpointName=endpoint_name, WaiterConfig={'Delay': delay_seconds, 'MaxAttempts': max_attempts})
+            return "InService"
+        except ClientError as e:
+            # On waiter failure, check actual status
+            try:
+                desc = self.sagemaker_client.describe_endpoint(EndpointName=endpoint_name)
+                return desc.get('EndpointStatus', 'Failed')
+            except Exception:
+                logger.error(f"Failed to describe endpoint {endpoint_name} after waiter error: {e}")
+                return "Failed"
+
     def _deploy_dry_run(self, config: SageMakerDeploymentConfig) -> DeploymentResult:
         """Simulate deployment in dry-run mode."""
         logger.info(f"[DRY-RUN] Would create model: {config.model_name}")
@@ -312,7 +350,7 @@ class SageMakerTool:
     
     def _estimate_cost(self, config: SageMakerDeploymentConfig) -> float:
         """Estimate hourly cost (matching guardrail pricing)."""
-        from orchestrator.guardrail import INSTANCE_PRICING
-        base_price = INSTANCE_PRICING.get(config.instance_type, 1.0)
+        from orchestrator.guardrail import DEFAULT_INSTANCE_PRICING
+        base_price = DEFAULT_INSTANCE_PRICING.get(config.instance_type, 1.0)
         return base_price * config.instance_count
 

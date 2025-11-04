@@ -1,6 +1,8 @@
 """Guardrail service for validating deployment plans."""
 
 import logging
+import os
+import json
 from typing import Dict, Any, List
 
 from orchestrator.models import SageMakerDeploymentConfig, ValidationResult, Environment
@@ -8,8 +10,8 @@ from orchestrator.models import SageMakerDeploymentConfig, ValidationResult, Env
 logger = logging.getLogger(__name__)
 
 
-# Instance type pricing (mock for MVP - in production, use AWS Pricing API)
-INSTANCE_PRICING = {
+# Instance type pricing (override via env JSON; in production, use AWS Pricing API)
+DEFAULT_INSTANCE_PRICING = {
     "ml.m5.large": 0.115,  # USD per hour
     "ml.m5.xlarge": 0.230,
     "ml.m5.2xlarge": 0.460,
@@ -20,8 +22,8 @@ INSTANCE_PRICING = {
     "ml.p5.48xlarge": 71.296,
 }
 
-# Environment-specific policies
-ENV_POLICIES = {
+# Environment-specific policies (override via env JSON)
+DEFAULT_ENV_POLICIES = {
     Environment.DEV: {
         "required_instance_type": ["ml.m5.large"],
         "max_budget_usd_per_hour": 15.0,
@@ -48,8 +50,90 @@ class GuardrailService:
 
     def __init__(self):
         """Initialize guardrail service."""
-        self.instance_pricing = INSTANCE_PRICING.copy()
-        self.env_policies = ENV_POLICIES.copy()
+        pricing_json = os.getenv("INSTANCE_PRICING_JSON")
+        policies_json = os.getenv("ENV_POLICIES_JSON")
+        self.cost_source = os.getenv("COST_SOURCE", "env").lower()  # env | aws_pricing
+        self.aws_region = os.getenv("AWS_REGION", "us-east-1")
+        self._pricing_cache: Dict[str, float] = {}
+
+        try:
+            self.instance_pricing = json.loads(pricing_json) if pricing_json else DEFAULT_INSTANCE_PRICING.copy()
+        except Exception as e:
+            logger.warning(f"Failed to parse INSTANCE_PRICING_JSON: {e}, using defaults")
+            self.instance_pricing = DEFAULT_INSTANCE_PRICING.copy()
+
+        try:
+            raw_policies = json.loads(policies_json) if policies_json else DEFAULT_ENV_POLICIES.copy()
+            if isinstance(raw_policies, dict) and all(isinstance(k, str) for k in raw_policies.keys()):
+                mapped = {}
+                for k, v in raw_policies.items():
+                    try:
+                        mapped[Environment(k)] = v
+                    except Exception:
+                        mapped[k] = v
+                self.env_policies = mapped
+            else:
+                self.env_policies = raw_policies
+        except Exception as e:
+            logger.warning(f"Failed to parse ENV_POLICIES_JSON: {e}, using defaults")
+            self.env_policies = DEFAULT_ENV_POLICIES.copy()
+
+    def _get_price_from_cache_or_source(self, instance_type: str) -> float:
+        # Cache first
+        if instance_type in self._pricing_cache:
+            return self._pricing_cache[instance_type]
+        # Env source
+        if self.cost_source != "aws_pricing":
+            price = self.instance_pricing.get(instance_type, 1.0)
+            self._pricing_cache[instance_type] = price
+            return price
+        # AWS Pricing API
+        try:
+            import boto3
+            pricing = boto3.client('pricing', region_name='us-east-1')
+            resp = pricing.get_products(
+                ServiceCode='AmazonSageMaker',
+                Filters=[
+                    { 'Type': 'TERM_MATCH', 'Field': 'instanceType', 'Value': instance_type },
+                    { 'Type': 'TERM_MATCH', 'Field': 'location', 'Value': self._region_to_location(self.aws_region) },
+                    { 'Type': 'TERM_MATCH', 'Field': 'operation', 'Value': 'OnDemand' },
+                ],
+                MaxResults=1,
+            )
+            price = self._parse_price(resp)
+            if price:
+                self._pricing_cache[instance_type] = price
+                return price
+        except Exception as e:
+            logger.warning(f"AWS Pricing lookup failed for {instance_type}: {e}; falling back to env pricing")
+        return self.instance_pricing.get(instance_type, 1.0)
+
+    @staticmethod
+    def _region_to_location(region: str) -> str:
+        # Minimal mapping; extend as needed
+        mapping = {
+            'us-east-1': 'US East (N. Virginia)',
+            'us-east-2': 'US East (Ohio)',
+            'us-west-2': 'US West (Oregon)',
+        }
+        return mapping.get(region, 'US East (N. Virginia)')
+
+    @staticmethod
+    def _parse_price(resp: Any) -> float:
+        try:
+            import json as _json
+            for p in resp.get('PriceList', []):
+                data = _json.loads(p)
+                terms = data.get('terms', {}).get('OnDemand', {})
+                for _, term in terms.items():
+                    price_dimensions = term.get('priceDimensions', {})
+                    for _, dim in price_dimensions.items():
+                        usd = dim.get('pricePerUnit', {}).get('USD')
+                        if usd:
+                            return float(usd)
+        except Exception:
+            return None
+        return None
     
     def estimate_cost(self, config: SageMakerDeploymentConfig) -> float:
         """Estimate hourly cost for deployment configuration.
@@ -60,7 +144,7 @@ class GuardrailService:
         Returns:
             Estimated hourly cost in USD
         """
-        base_price = self.instance_pricing.get(config.instance_type, 1.0)  # Default $1/hr if unknown
+        base_price = self._get_price_from_cache_or_source(config.instance_type)
         return base_price * config.instance_count
     
     def validate_plan(

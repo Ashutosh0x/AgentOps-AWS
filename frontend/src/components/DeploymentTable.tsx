@@ -5,12 +5,14 @@ import { formatDate, getStatusBadgeColor } from '../lib/utils'
 import { ExternalLink, MoreVertical, FileText, Pause, RotateCw, X } from 'lucide-react'
 import { apiClient } from '../lib/api'
 import ConfirmDialog from './ConfirmDialog'
+import { useToast } from '../contexts/ToastContext'
 import DeploymentDetailsModal from './DeploymentDetailsModal'
 
 export default function DeploymentTable() {
   const { data, isLoading, error } = useDeployments()
   const [selectedDeployment, setSelectedDeployment] = useState<any>(null)
   const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false)
+  const [filter, setFilter] = useState('')
 
   if (isLoading) {
     return (
@@ -35,13 +37,34 @@ export default function DeploymentTable() {
     )
   }
 
-  const deployments = data?.deployments || []
+  const deployments = (data?.deployments || []).filter((d: any) => {
+    if (!filter.trim()) return true
+    const f = filter.toLowerCase()
+    return (
+      d.intent?.toLowerCase().includes(f) ||
+      d.artifact?.endpoint_name?.toLowerCase().includes(f) ||
+      d.status?.toLowerCase().includes(f)
+    )
+  })
 
   return (
     <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-visible">
       <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-        <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Deployment Plans</h2>
-        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">{deployments.length} total deployments</p>
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Deployment Plans</h2>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">{deployments.length} shown</p>
+          </div>
+          <div className="w-80">
+            <input
+              type="text"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="Filter by intent, endpoint or status"
+              className="w-full px-3 py-2 text-sm bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400"
+            />
+          </div>
+        </div>
       </div>
 
       <DeploymentDetailsModal
@@ -118,6 +141,7 @@ function DeploymentActionsMenu({ deployment, onMenuToggle, onViewDetails }: Depl
   const menuRef = useRef<HTMLDivElement>(null)
   const buttonRef = useRef<HTMLButtonElement>(null)
   const queryClient = useQueryClient()
+  const { showToast } = useToast()
 
   // Notify parent when menu state changes
   useEffect(() => {
@@ -161,9 +185,10 @@ function DeploymentActionsMenu({ deployment, onMenuToggle, onViewDetails }: Depl
       await apiClient.pauseDeployment(deployment.plan_id)
       // Refresh deployments list
       queryClient.invalidateQueries('deployments')
+      showToast(`Deployment ${deployment.plan_id} paused`, { variant: 'info' })
     } catch (error) {
       console.error('Failed to pause deployment:', error)
-      alert('Failed to pause deployment. Please try again.')
+      showToast('Failed to pause deployment. Please try again.', { variant: 'error', title: 'Action failed' })
     } finally {
       setIsProcessing(false)
     }
@@ -176,9 +201,10 @@ function DeploymentActionsMenu({ deployment, onMenuToggle, onViewDetails }: Depl
       await apiClient.restartDeployment(deployment.plan_id)
       // Refresh deployments list
       queryClient.invalidateQueries('deployments')
+      showToast(`Restarted ${deployment.plan_id}`, { variant: 'info' })
     } catch (error) {
       console.error('Failed to restart deployment:', error)
-      alert('Failed to restart deployment. Please try again.')
+      showToast('Failed to restart deployment. Please try again.', { variant: 'error', title: 'Action failed' })
     } finally {
       setIsProcessing(false)
     }
@@ -197,6 +223,7 @@ function DeploymentActionsMenu({ deployment, onMenuToggle, onViewDetails }: Depl
         setShowDeleteDialog(false)
         // Refresh deployments list
         queryClient.invalidateQueries('deployments')
+        showToast('Deployment deleted', { variant: 'success' })
       } else {
         throw new Error(response.message || 'Failed to delete deployment')
       }
@@ -204,7 +231,7 @@ function DeploymentActionsMenu({ deployment, onMenuToggle, onViewDetails }: Depl
       console.error('Failed to delete deployment:', error)
       // Show error message but keep dialog open for retry
       const errorMessage = error?.response?.data?.detail || error?.message || 'Failed to delete deployment. Please try again.'
-      alert(errorMessage) // Could replace with a toast notification
+      showToast(errorMessage, { variant: 'error', title: 'Delete failed' })
       // Dialog will stay open on error so user can retry
     } finally {
       setIsProcessing(false)

@@ -6,8 +6,8 @@ import logging
 from datetime import datetime
 from typing import Dict, Any, Optional
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from orchestrator.models import (
@@ -36,8 +36,25 @@ from orchestrator.agents.monitoring_agent import MonitoringAgent
 from orchestrator.agent_memory import AgentMemory
 from orchestrator.tool_registry import get_tool_registry
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure structured logging
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        import json as _json
+        base = {
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if hasattr(record, 'plan_id'):
+            base['plan_id'] = getattr(record, 'plan_id')
+        return _json.dumps(base)
+
+handler = logging.StreamHandler()
+handler.setFormatter(JsonFormatter())
+root_logger = logging.getLogger()
+root_logger.handlers = []
+root_logger.addHandler(handler)
+root_logger.setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
@@ -46,6 +63,28 @@ app = FastAPI(
     description="Autonomous, safety-first model deployment orchestrator",
     version="1.0.0"
 )
+
+# Optional API key protection for /api/* routes
+@app.middleware("http")
+async def api_key_middleware(request: Request, call_next):
+    api_key = os.getenv("API_KEY")
+    # Enforce only on API namespace if API_KEY is set
+    if api_key and request.url.path.startswith("/api/"):
+        provided = request.headers.get("x-api-key") or request.query_params.get("api_key")
+        if provided != api_key:
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    # Optional HMAC signature validation
+    hmac_secret = os.getenv("HMAC_SECRET")
+    if hmac_secret and request.url.path.startswith("/api/"):
+        import hmac, hashlib
+        signature = request.headers.get("x-signature")
+        # Compute HMAC over method + path + body
+        body = await request.body()
+        payload = f"{request.method}\n{request.url.path}\n".encode("utf-8") + body
+        expected = hmac.new(hmac_secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+        if not signature or not hmac.compare_digest(signature, expected):
+            return JSONResponse({"detail": "Invalid signature"}, status_code=401)
+    return await call_next(request)
 
 # CORS middleware for UI
 # Get allowed origins from environment, default to localhost for development
@@ -66,6 +105,12 @@ app.add_middleware(
 # In-memory fallback (for compatibility)
 plans_store: Dict[str, DeploymentPlan] = {}
 approvals_store: Dict[str, ApprovalRequest] = {}
+# Simple lifecycle counters (in-memory)
+deploy_counters = {
+    "started": 0,
+    "succeeded": 0,
+    "failed": 0,
+}
 
 # Initialize services
 llm_client: Optional[LLMClient] = None
@@ -250,6 +295,8 @@ def _ensure_services_initialized():
         except Exception as e:
             logger.error(f"Failed to initialize services: {e}")
             raise
+
+        # Demo seeding removed for realistic operation by default
 
 
 @app.on_event("startup")
@@ -446,6 +493,7 @@ async def approve_plan(approval: ApprovalRequest, background_tasks: BackgroundTa
         # Update plan status
         plan.status = PlanStatus.DEPLOYING
         plan.updated_at = datetime.utcnow()
+        deploy_counters["started"] += 1
         plans_store[plan_id] = plan
         if plans_storage and plans_storage.enabled:
             plans_storage.save_plan(plan)
@@ -584,6 +632,100 @@ async def get_plan(plan_id: str):
     }
 
 
+def _seed_demo_plan():
+    """Create a deterministic demo plan with rich reasoning steps if none exists."""
+    demo_plan_id = os.getenv("DEMO_PLAN_ID", "demo-plan-001")
+    if demo_plan_id in plans_store:
+        return
+
+    from orchestrator.models import SageMakerDeploymentConfig, RAGEvidence
+
+    config = SageMakerDeploymentConfig(
+        model_name=os.getenv("DEMO_MODEL_NAME", "llama-3.1-8b-staging"),
+        endpoint_name=os.getenv("DEMO_ENDPOINT_NAME", "chatbot-x-staging"),
+        instance_type=os.getenv("DEMO_INSTANCE_TYPE", "ml.m5.large"),
+        instance_count=int(os.getenv("DEMO_INSTANCE_COUNT", "1")),
+        budget_usd_per_hour=float(os.getenv("DEMO_BUDGET_USD_PER_HOUR", "15.0"))
+    )
+
+    evidence = [
+        RAGEvidence(title="AWS Security Policies", snippet="Require staging to use non-GPU instances where possible."),
+        RAGEvidence(title="AWS Pricing Catalog", snippet="ml.m5.large costs approx $0.115/hr."),
+    ]
+
+    now = datetime.utcnow()
+    steps = [
+        TaskStep(step_id="retriever-1", agent_type="retriever", action="retrieve_policies", status="completed", timestamp=now),
+        TaskStep(step_id="planner-1", agent_type="planner", action="generate_config", status="completed", timestamp=now),
+        TaskStep(step_id="executor-1", agent_type="executor", action="validate_plan", status="completed", timestamp=now),
+        TaskStep(step_id="executor-2", agent_type="executor", action="create_model", status="executing", timestamp=now),
+        TaskStep(step_id="executor-3", agent_type="executor", action="create_endpoint_config", status="pending", timestamp=now),
+        TaskStep(step_id="executor-4", agent_type="executor", action="create_endpoint", status="pending", timestamp=now),
+        TaskStep(step_id="monitor-1", agent_type="monitor", action="configure_monitoring", status="pending", timestamp=now),
+    ]
+
+    plan = DeploymentPlan(
+        plan_id=demo_plan_id,
+        status=PlanStatus.DEPLOYING,
+        user_id=os.getenv("DEMO_USER_ID", "demo@agentops.ai"),
+        intent=os.getenv("DEMO_INTENT", "deploy llama-3.1 8B for chatbot-x"),
+        env=Environment.STAGING,
+        artifact=config,
+        evidence=evidence,
+        reasoning_steps=steps,
+        created_at=now
+    )
+
+    plans_store[demo_plan_id] = plan
+    if plans_storage and plans_storage.enabled:
+        plans_storage.save_plan(plan)
+
+
+@app.get("/api/events/{plan_id}")
+async def stream_plan_events(plan_id: str):
+    """Simple SSE stream of plan status and step updates (demo-friendly)."""
+    _ensure_services_initialized()
+
+    async def event_generator():
+        import asyncio
+        sent = 0
+        while True:
+            plan = None
+            if plans_storage and plans_storage.enabled:
+                plan = plans_storage.get_plan(plan_id)
+                if plan:
+                    plans_store[plan_id] = plan
+            if not plan and plan_id in plans_store:
+                plan = plans_store[plan_id]
+            if not plan:
+                yield f"event: error\ndata: { {'error': f'plan {plan_id} not found'} }\n\n"
+                return
+
+            # Serialize minimal status payload
+            step_payload = [
+                {
+                    "step_id": s.step_id,
+                    "agent_type": s.agent_type,
+                    "action": s.action,
+                    "status": s.status,
+                    "message": s.output.get("message") if s.output else None,
+                }
+                for s in (plan.reasoning_steps or [])
+            ]
+            payload = {
+                "plan_id": plan.plan_id,
+                "status": plan.status.value if hasattr(plan.status, 'value') else str(plan.status),
+                "steps": step_payload,
+            }
+            import json as _json
+            yield f"data: {_json.dumps(payload)}\n\n"
+
+            sent += 1
+            await asyncio.sleep(1.5)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
 @app.get("/approvals-ui", response_class=HTMLResponse)
 async def approvals_ui():
     """Simple HTML UI for approval queue."""
@@ -629,6 +771,10 @@ async def get_monthly_costs():
     result = cost_service.get_monthly_gpu_spend()
     
     return result
+
+@app.get("/api/metrics/deployments/counters")
+async def get_deploy_counters():
+    return deploy_counters
 
 
 @app.get("/api/deployments")
@@ -695,6 +841,76 @@ async def get_all_deployments():
     return {
         "deployments": deployments,
         "count": len(deployments)
+    }
+
+
+@app.get("/api/deployments/{plan_id}")
+async def get_deployment_details(plan_id: str):
+    """Get a single deployment plan with full details (including approval info)."""
+    _ensure_services_initialized()
+
+    plan = None
+    if plans_storage and plans_storage.enabled:
+        plan = plans_storage.get_plan(plan_id)
+        if plan:
+            plans_store[plan_id] = plan
+
+    if not plan and plan_id in plans_store:
+        plan = plans_store[plan_id]
+
+    if not plan:
+        raise HTTPException(status_code=404, detail=f"Plan {plan_id} not found")
+
+    # Build response similar to /plan/{plan_id}
+    def serialize_plan(plan: DeploymentPlan) -> Dict[str, Any]:
+        plan_dict = plan.dict(exclude_none=True)
+
+        if plan.created_at:
+            plan_dict["created_at"] = plan.created_at.isoformat() if isinstance(plan.created_at, datetime) else plan.created_at
+        if plan.updated_at:
+            plan_dict["updated_at"] = plan.updated_at.isoformat() if isinstance(plan.updated_at, datetime) else plan.updated_at
+
+        if plan.reasoning_steps:
+            serialized_steps = []
+            for step in plan.reasoning_steps:
+                step_dict = step.dict(exclude_none=True)
+                if step.timestamp:
+                    step_dict["timestamp"] = step.timestamp.isoformat() if isinstance(step.timestamp, datetime) else step.timestamp
+                if step.reasoning_chain:
+                    chain_dict = step.reasoning_chain.dict(exclude_none=True)
+                    if step.reasoning_chain.steps:
+                        chain_steps = []
+                        for rs in step.reasoning_chain.steps:
+                            rs_dict = rs.dict(exclude_none=True)
+                            if rs.timestamp:
+                                rs_dict["timestamp"] = rs.timestamp.isoformat() if isinstance(rs.timestamp, datetime) else rs.timestamp
+                            chain_steps.append(rs_dict)
+                        chain_dict["steps"] = chain_steps
+                    if step.reasoning_chain.created_at:
+                        chain_dict["created_at"] = step.reasoning_chain.created_at.isoformat() if isinstance(step.reasoning_chain.created_at, datetime) else step.reasoning_chain.created_at
+                    step_dict["reasoning_chain"] = chain_dict
+                serialized_steps.append(step_dict)
+            plan_dict["reasoning_steps"] = serialized_steps
+
+        if plan.artifact:
+            plan_dict["artifact"] = plan.artifact.dict(exclude_none=True)
+
+        if plan.evidence:
+            plan_dict["evidence"] = [ev.dict(exclude_none=True) for ev in plan.evidence]
+
+        return plan_dict
+
+    approval_info = None
+    if plans_storage and plans_storage.enabled:
+        approval = plans_storage.get_approval(plan_id)
+        if approval:
+            approval_info = approval.dict()
+    elif plan_id in approvals_store:
+        approval_info = approvals_store[plan_id].dict()
+
+    return {
+        "plan": serialize_plan(plan),
+        "approval": approval_info
     }
 
 
@@ -1186,16 +1402,114 @@ async def execute_deployment(plan_id: str, config):
         plan.status = PlanStatus.DEPLOYING
         plan.updated_at = datetime.utcnow()
         
-        # Execute deployment
-        result = sage_tool.deploy_model(config)
+        # Helper to update a step's status consistently
+        def update_step(action: str, status: str, message: str = None):
+            step = None
+            for s in (plan.reasoning_steps or []):
+                if s.action == action:
+                    step = s
+                    break
+            if not step:
+                # Create step if not present
+                step = TaskStep(
+                    step_id=f"{action}-{uuid.uuid4().hex[:8]}",
+                    agent_type="executor",
+                    action=action,
+                    status=status,
+                    output={"message": message} if message else {},
+                )
+                plan.reasoning_steps.append(step)
+            else:
+                step.status = status
+                if message:
+                    step.output = step.output or {}
+                    step.output["message"] = message
+            plan.updated_at = datetime.utcnow()
+            plans_store[plan_id] = plan
+            if plans_storage and plans_storage.enabled:
+                plans_storage.save_plan(plan)
         
-        # Update plan
-        if result.success:
-            plan.status = PlanStatus.DEPLOYED
-            logger.info(f"[{plan_id}] Deployment successful: {result.endpoint_name}")
-        else:
+        # Retry/backoff helper
+        import time
+        def with_retries(op_name: str, func, *args, retries: int = 3, base_delay: float = 2.0, **kwargs):
+            attempt = 0
+            while True:
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    # Map AWS errors if possible
+                    friendly = str(e)
+                    try:
+                        from botocore.exceptions import ClientError
+                        if isinstance(e, ClientError):
+                            code = e.response.get('Error', {}).get('Code', 'ClientError')
+                            msg = e.response.get('Error', {}).get('Message', friendly)
+                            friendly = f"{op_name} failed ({code}): {msg}"
+                    except Exception:
+                        pass
+                    attempt += 1
+                    if attempt > retries:
+                        raise RuntimeError(friendly)
+                    delay = base_delay * (2 ** (attempt - 1))
+                    logger.warning(f"[{plan_id}] {op_name} attempt {attempt} failed, retrying in {delay:.1f}s: {friendly}")
+                    time.sleep(delay)
+
+        # 1) Create model
+        update_step("create_model", "executing", "Creating model")
+        try:
+            model_name = with_retries("create_model", sage_tool.create_model, config)
+            update_step("create_model", "completed", f"Model {model_name} created")
+        except Exception as e:
+            update_step("create_model", "failed", f"Create model failed: {str(e)}")
             plan.status = PlanStatus.FAILED
-            logger.error(f"[{plan_id}] Deployment failed: {result.message}")
+            plans_store[plan_id] = plan
+            if plans_storage and plans_storage.enabled:
+                plans_storage.save_plan(plan)
+            await audit_logger.log_deployment(plan_id, {
+                "success": False,
+                "message": f"Create model failed: {str(e)}"
+            })
+            return
+        
+        # 2) Create endpoint config
+        update_step("create_endpoint_config", "executing", "Creating endpoint config")
+        try:
+            endpoint_config_name = with_retries("create_endpoint_config", sage_tool.create_endpoint_config, config, model_name)
+            update_step("create_endpoint_config", "completed", f"Endpoint config {endpoint_config_name} created")
+        except Exception as e:
+            update_step("create_endpoint_config", "failed", f"Create endpoint config failed: {str(e)}")
+            plan.status = PlanStatus.FAILED
+            plans_store[plan_id] = plan
+            if plans_storage and plans_storage.enabled:
+                plans_storage.save_plan(plan)
+            await audit_logger.log_deployment(plan_id, {
+                "success": False,
+                "message": f"Create endpoint config failed: {str(e)}"
+            })
+            return
+        
+        # 3) Create endpoint
+        update_step("create_endpoint", "executing", "Creating endpoint")
+        try:
+            endpoint_name = with_retries("create_endpoint", sage_tool.create_endpoint, config, endpoint_config_name)
+            update_step("create_endpoint", "executing", f"Endpoint {endpoint_name} creating...")
+            # Wait for endpoint to be InService/Failed
+            final_status = with_retries("wait_for_endpoint", sage_tool.wait_for_endpoint, endpoint_name, retries=1, base_delay=5.0)
+            if final_status == "InService":
+                update_step("create_endpoint", "completed", f"Endpoint {endpoint_name} InService")
+                plan.status = PlanStatus.DEPLOYED
+                logger.info(f"[{plan_id}] Deployment successful: {endpoint_name}")
+                deploy_counters["succeeded"] += 1
+            else:
+                update_step("create_endpoint", "failed", f"Endpoint status: {final_status}")
+                plan.status = PlanStatus.FAILED
+                logger.error(f"[{plan_id}] Deployment failed with endpoint status: {final_status}")
+                deploy_counters["failed"] += 1
+        except Exception as e:
+            update_step("create_endpoint", "failed", f"Create endpoint failed: {str(e)}")
+            plan.status = PlanStatus.FAILED
+            deploy_counters["failed"] += 1
+        
         
         plan.updated_at = datetime.utcnow()
         
@@ -1205,7 +1519,11 @@ async def execute_deployment(plan_id: str, config):
             plans_storage.save_plan(plan)
         
         # Audit log
-        await audit_logger.log_deployment(plan_id, result)
+        # Create a minimal deployment result for audit
+        await audit_logger.log_deployment(plan_id, {
+            "success": plan.status == PlanStatus.DEPLOYED,
+            "message": f"Deployment {plan.status.value}",
+        })
         
     except Exception as e:
         logger.error(f"[{plan_id}] Error executing deployment: {e}", exc_info=True)

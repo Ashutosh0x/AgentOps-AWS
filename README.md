@@ -867,4 +867,3 @@ If you find this project useful, please consider giving it a star ⭐
 **Made for AWS & NVIDIA Hackathon 2024**
 
 </div>
-

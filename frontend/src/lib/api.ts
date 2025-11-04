@@ -21,6 +21,16 @@ const api = axios.create({
   timeout: 30000, // 30 second timeout
 })
 
+// Attach API key header if configured
+api.interceptors.request.use((config) => {
+  const apiKey = (import.meta as any).env?.VITE_API_KEY
+  if (apiKey) {
+    config.headers = config.headers || {}
+    ;(config.headers as any)['x-api-key'] = apiKey
+  }
+  return config
+})
+
 // Add request interceptor for error handling
 api.interceptors.response.use(
   (response) => response,
@@ -195,18 +205,22 @@ export const apiClient = {
   },
 
   getDeploymentDetails: async (plan_id: string): Promise<Deployment> => {
-    // Try to get from /plan/{plan_id} endpoint, or use deployment from list
+    // Prefer API details endpoint, fallback to legacy /plan route, then list
     try {
-      const response = await api.get<{ plan: Deployment; approval?: any }>(`/plan/${plan_id}`)
+      const response = await api.get<{ plan: Deployment; approval?: any }>(`/api/deployments/${plan_id}`)
       return response.data.plan
-    } catch (error) {
-      // Fallback: get from deployments list
-      const deploymentsResponse = await api.get<DeploymentsResponse>('/api/deployments')
-      const deployment = deploymentsResponse.data.deployments.find(d => d.plan_id === plan_id)
-      if (!deployment) {
-        throw new Error(`Deployment ${plan_id} not found`)
+    } catch (_e) {
+      try {
+        const response = await api.get<{ plan: Deployment; approval?: any }>(`/plan/${plan_id}`)
+        return response.data.plan
+      } catch (_e2) {
+        const deploymentsResponse = await api.get<DeploymentsResponse>('/api/deployments')
+        const deployment = deploymentsResponse.data.deployments.find(d => d.plan_id === plan_id)
+        if (!deployment) {
+          throw new Error(`Deployment ${plan_id} not found`)
+        }
+        return deployment
       }
-      return deployment
     }
   },
 
